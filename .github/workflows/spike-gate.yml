@@ -1,0 +1,101 @@
+name: spike-gate
+
+# Release gate on an exact commit: reuse a passing gate, else check out the SHA,
+# post a check run on it, read OIDC claims, and complete the check run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit to gate
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  R: ${{ github.repository }}
+  SHA: ${{ inputs.sha }}
+  CHECK: avm-release-gate
+
+jobs:
+  find:
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+    outputs:
+      reuse: ${{ steps.find.outputs.reuse }}
+    steps:
+      - id: find
+        shell: bash
+        run: |
+          set -euo pipefail
+          runs=$(gh api "repos/$R/commits/$SHA/check-runs?check_name=$CHECK&filter=latest" --jq '[.check_runs[]|{id,status,conclusion,app:.app.slug}]')
+          n=$(jq '[.[]|select(.status=="completed" and .conclusion=="success")]|length' <<<"$runs")
+          echo "RESULT|gate-find-existing|ref=$GITHUB_REF_NAME|passing=$n|$runs"
+          if [ "$n" -gt 0 ]; then echo reuse=true >> "$GITHUB_OUTPUT"; else echo reuse=false >> "$GITHUB_OUTPUT"; fi
+
+  gate:
+    needs: find
+    if: needs.find.outputs.reuse != 'true'
+    runs-on: ubuntu-latest
+    environment: release-gate
+    permissions:
+      checks: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Start check run
+        id: start
+        shell: bash
+        run: |
+          set -euo pipefail
+          id=$(gh api "repos/$R/check-runs" -f name="$CHECK" -f head_sha="$SHA" -f status=in_progress --jq .id)
+          echo "RESULT|gate-check-run-create|id=$id"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+
+      - name: Verify exact commit
+        shell: bash
+        run: |
+          head=$(git rev-parse HEAD)
+          subject=$(git log -1 --format=%s)
+          match=no; [ "$head" = "$SHA" ] && match=yes
+          echo "RESULT|gate-checkout-exact|match=$match|head=$head|subject=$subject"
+          [ "$match" = yes ]
+
+      - name: Static and unit checks stand-in
+        run: echo "PR Check static and unit tiers would run here"
+
+      - name: OIDC claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          tok=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          claims=$(python3 -c 'import sys,base64,json;p=sys.argv[1].split(".")[1];p+="="*(-len(p)%4);c=json.loads(base64.urlsafe_b64decode(p));print(json.dumps({k:c.get(k) for k in ["sub","environment","ref","sha","job_workflow_ref","job_workflow_sha","event_name"]}))' "$tok")
+          echo "RESULT|gate-oidc-claims|$claims"
+
+      - name: Complete check run
+        if: always() && steps.start.outputs.id != ''
+        shell: bash
+        env:
+          ID: ${{ steps.start.outputs.id }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          conclusion=failure; [ "$OUTCOME" = success ] && conclusion=success
+          out=$(gh api -X PATCH "repos/$R/check-runs/$ID" -f status=completed -f conclusion="$conclusion" -f 'output[title]=Release gate' -f 'output[summary]=Spike gate result' --jq '{id,status,conclusion,app:.app.slug,suite:.check_suite.id}')
+          echo "RESULT|gate-check-run-complete|$out"
+
+  reused:
+    needs: find
+    if: needs.find.outputs.reuse == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "RESULT|gate-reused|existing passing gate on $SHA, no environment or checkout needed"

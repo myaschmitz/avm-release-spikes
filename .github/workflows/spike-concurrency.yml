@@ -1,0 +1,29 @@
+name: spike-concurrency
+
+# Dispatch this several times quickly. Expect: first runs, middle ones are
+# cancelled as superseded pending runs, and the last one runs after the first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        type: string
+        default: ''
+
+concurrency:
+  group: avm-release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  hold:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "RESULT|concurrency|tag=$TAG|start=$(date -u +%FT%TZ)"
+          sleep 90
+          echo "RESULT|concurrency|tag=$TAG|end=$(date -u +%FT%TZ)"

@@ -1,0 +1,20 @@
+name: spike-scheduler
+
+# Offset 15-minute cron. Delay is measured afterwards from run created_at
+# versus the cron slot.
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        env:
+          CRON: ${{ github.event.schedule }}
+        run: echo "RESULT|tick|cron=$CRON|now=$(date -u +%FT%TZ)"

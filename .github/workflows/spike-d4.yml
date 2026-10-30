@@ -1,0 +1,122 @@
+name: spike-d4
+
+# What can GITHUB_TOKEN do for release automation?
+# Each probe prints: RESULT|<name>|expected=<allow|deny>|actual=<allow|deny>|<AS_EXPECTED|SURPRISE>|<output>
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  checks: write
+
+jobs:
+  probes:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      R: ${{ github.repository }}
+      RUN: ${{ github.run_number }}
+      SHA: ${{ github.sha }}
+      REF_NAME: ${{ github.ref_name }}
+      STATE: avm-release-state
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Run probes
+        shell: bash
+        run: |
+          set -uo pipefail
+          LAST_OUT=""
+          probe() {
+            local name="$1" expected="$2"; shift 2
+            local out rc actual verdict
+            out="$("$@" 2>&1)"; rc=$?
+            if [ $rc -eq 0 ]; then actual=allow; else actual=deny; fi
+            if [ "$actual" = "$expected" ]; then verdict=AS_EXPECTED; else verdict=SURPRISE; fi
+            printf 'RESULT|%s|expected=%s|actual=%s|%s|%s\n' "$name" "$expected" "$actual" "$verdict" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-400)"
+            LAST_OUT="$out"
+          }
+          mkcommit() {
+            local msg="$1" parent="$2" blob tree
+            blob=$(jq -n --arg c "{\"schemaVersion\":1,\"run\":$RUN,\"ref\":\"$REF_NAME\"}" '{content:$c,encoding:"utf-8"}' | gh api "repos/$R/git/blobs" --input - --jq .sha) || return 1
+            tree=$(jq -n --arg b "$blob" '{tree:[{path:"state.json",mode:"100644",type:"blob",sha:$b}]}' | gh api "repos/$R/git/trees" --input - --jq .sha) || return 1
+            if [ -n "$parent" ]; then
+              jq -n --arg m "$msg" --arg t "$tree" --arg p "$parent" '{message:$m,tree:$t,parents:[$p]}' | gh api "repos/$R/git/commits" --input - --jq .sha
+            else
+              jq -n --arg m "$msg" --arg t "$tree" '{message:$m,tree:$t,parents:[]}' | gh api "repos/$R/git/commits" --input - --jq .sha
+            fi
+          }
+
+          echo "::group::context"
+          echo "RESULT|context|ref=$REF_NAME|sha=$SHA|run=$RUN"
+          probe rate-limit allow gh api rate_limit --jq '.resources.core|{limit,remaining}'
+          echo "::endgroup::"
+
+          echo "::group::state branch via API"
+          if gh api "repos/$R/git/ref/heads/$STATE" >/dev/null 2>&1; then
+            echo "RESULT|state-branch-exists|yes"
+          else
+            C0=$(mkcommit "init state (run $RUN)" "")
+            probe state-create-orphan-branch allow gh api "repos/$R/git/refs" -f ref="refs/heads/$STATE" -f sha="$C0" --jq .ref
+          fi
+          HEAD_STATE=$(gh api "repos/$R/git/ref/heads/$STATE" --jq .object.sha)
+          C1=$(mkcommit "ff update (run $RUN, ref $REF_NAME)" "$HEAD_STATE")
+          probe state-ff-update-api allow gh api -X PATCH "repos/$R/git/refs/heads/$STATE" -f sha="$C1" -F force=false --jq .object.sha
+          C2=$(mkcommit "orphan rewrite (run $RUN)" "")
+          probe state-force-update-api deny gh api -X PATCH "repos/$R/git/refs/heads/$STATE" -f sha="$C2" -F force=true --jq .object.sha
+          probe state-delete-api deny gh api -X DELETE "repos/$R/git/refs/heads/$STATE"
+          echo "::endgroup::"
+
+          echo "::group::state branch via git"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git fetch -q origin "$STATE" && git switch -q -c st FETCH_HEAD; then
+            echo "{\"git\":$RUN}" > git.json && git add git.json && git commit -qm "git push (run $RUN, ref $REF_NAME)"
+            probe state-ff-push-git allow git push origin "HEAD:refs/heads/$STATE"
+            git switch -q --orphan rewrite && echo '{}' > state.json && git add state.json && git commit -qm "git orphan rewrite (run $RUN)"
+            probe state-force-push-git deny git push --force origin "HEAD:refs/heads/$STATE"
+          else
+            echo "RESULT|state-git|skipped: state branch missing"
+          fi
+          git switch -q --detach "$SHA"
+          echo "::endgroup::"
+
+          echo "::group::tags and releases"
+          TAG="v0.0.$RUN"; GTAG="v0.1.$RUN"; RTAG="v0.2.$RUN"
+          probe tag-create-v-api allow gh api "repos/$R/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" --jq .ref
+          probe tag-move-v-api deny gh api -X PATCH "repos/$R/git/refs/tags/$TAG" -f sha="$C1" -F force=true --jq .object.sha
+          probe tag-delete-v-api deny gh api -X DELETE "repos/$R/git/refs/tags/$TAG"
+          probe tag-create-nonv-api deny gh api "repos/$R/git/refs" -f ref="refs/tags/spike-$RUN" -f sha="$SHA" --jq .ref
+          git tag "$GTAG" "$SHA"
+          probe tag-create-v-git allow git push origin "refs/tags/$GTAG"
+          probe release-generate-notes allow gh api "repos/$R/releases/generate-notes" -f tag_name="$GTAG" -f previous_tag_name="$TAG" --jq .name
+          probe release-create-existing-tag allow gh api "repos/$R/releases" -f tag_name="$TAG" -f name="$TAG" -f body="spike release" -f make_latest=true --jq '{id,tag_name}'
+          probe release-create-new-tag allow gh api "repos/$R/releases" -f tag_name="$RTAG" -f target_commitish="$SHA" -f name="$RTAG" -f body="spike release, tag made by release API" -f make_latest=false --jq '{id,tag_name}'
+          echo "::endgroup::"
+
+          echo "::group::release issue"
+          BODY=$'<!-- avm-release-issue -->\nSpike release issue'
+          probe issue-create allow gh api "repos/$R/issues" -f title="Spike release issue (run $RUN, ref $REF_NAME)" -f body="$BODY" --jq .number
+          N="$LAST_OUT"
+          probe issue-lock allow gh api -X PUT "repos/$R/issues/$N/lock" -f lock_reason=resolved
+          probe issue-comment-when-locked allow gh api "repos/$R/issues/$N/comments" -f body="#Release (posted by GITHUB_TOKEN; must not trigger spike-triggers)" --jq .id
+          probe issue-edit-body allow gh api -X PATCH "repos/$R/issues/$N" -f body="$BODY (edited)" --jq .number
+          probe issue-add-label allow gh api "repos/$R/issues/$N/labels" -f 'labels[]=patch' --jq '[.[].name]'
+          probe issue-timeline-label-actor allow gh api "repos/$R/issues/$N/timeline" --jq '[.[]|select(.event=="labeled")|{actor:.actor.login,type:.actor.type,label:.label.name,app:(.performed_via_github_app.slug // null)}]'
+          probe issue-find-by-creator allow gh api "repos/$R/issues?state=all&creator=github-actions%5Bbot%5D&per_page=5" --jq '[.[]|{n:.number,marker:((.body // "")|contains("avm-release-issue"))}]'
+          echo "::endgroup::"
+
+          echo "::group::reads"
+          probe perm-read-admin allow gh api "repos/$R/collaborators/myaschmitz/permission" --jq '{permission,role_name}'
+          probe perm-read-noncollab allow gh api "repos/$R/collaborators/octocat/permission" --jq '{permission,role_name}'
+          probe metadata-read-main allow gh api -H 'Accept: application/vnd.github.raw' "repos/$R/contents/metadata.json?ref=main"
+          probe cross-repo-public-issues allow gh api "repos/Azure/azure-verified-modules-tools/issues?state=open&labels=release-freeze&per_page=5" --jq 'length'
+          probe cross-repo-public-metadata allow gh api -H 'Accept: application/vnd.github.raw' "repos/Azure/terraform-azurerm-avm-ptn-example-repo/contents/metadata.json"
+          probe org-team-membership deny gh api "orgs/Azure/teams/azure-verified-modules-engineering-owners/memberships/jaredfholgate" --jq .state
+          probe org-team-members-list deny gh api "orgs/Azure/teams/azure-verified-modules-engineering-owners/members?per_page=5" --jq 'length'
+          echo "::endgroup::"

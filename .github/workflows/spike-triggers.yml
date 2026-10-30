@@ -1,0 +1,31 @@
+name: spike-triggers
+
+# Logs which events fire. Bot (GITHUB_TOKEN) comments and labels should not
+# appear here; user ones should. Also checks pull_request_target labeled on a
+# merged PR, and push on a [skip ci] commit.
+
+on:
+  push:
+    branches: [main]
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [labeled, unlabeled, closed]
+
+permissions: {}
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          ACTOR: ${{ github.actor }}
+          TRIGGERING: ${{ github.triggering_actor }}
+          ASSOC: ${{ github.event.comment.author_association }}
+          LABEL: ${{ github.event.label.name }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          STATE: ${{ github.event.pull_request.state }}
+        run: echo "RESULT|trigger|event=$EVENT|action=$ACTION|actor=$ACTOR|triggering=$TRIGGERING|assoc=$ASSOC|label=$LABEL|merged=$MERGED|state=$STATE"
