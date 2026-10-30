@@ -30,6 +30,8 @@ jobs:
       - name: Run probes
         shell: bash
         run: |
+          # shell: bash implies -e; probes expect some commands to fail.
+          set +e
           set -uo pipefail
           LAST_OUT=""
           probe() {
