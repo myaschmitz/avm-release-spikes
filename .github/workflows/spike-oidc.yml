@@ -1,0 +1,31 @@
+name: spike-oidc
+
+# Same reusable workflow called by branch ref and by SHA. Compares the
+# job_workflow_ref claim, which AVM federated credentials match on.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  by-branch:
+    uses: myaschmitz/avm-release-spikes/.github/workflows/reusable-oidc.yml@main
+    permissions:
+      id-token: write
+    with:
+      label: by-branch
+
+  by-sha:
+    uses: myaschmitz/avm-release-spikes/.github/workflows/reusable-oidc.yml@37ec53c6be01af533ea67e6e251db533ac7ec6ae
+    permissions:
+      id-token: write
+    with:
+      label: by-sha
+
+  local:
+    uses: ./.github/workflows/reusable-oidc.yml
+    permissions:
+      id-token: write
+    with:
+      label: local
