@@ -10,3 +10,4 @@ Each workflow answers one question and prints `RESULT|...` lines to its log:
 - `spike-concurrency.yml`: how one concurrency group handles a burst of runs.
 - `spike-triggers.yml`: which events fire, and whether `GITHUB_TOKEN` actions retrigger workflows.
 - `spike-scheduler.yml`: real delay of a 15-minute offset cron.
+Last synced by spike.
